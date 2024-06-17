@@ -1,75 +1,102 @@
+# -*- coding: utf-8 -*-
 """
-Created on Fri Mar 30 12:39:26 2018
-This is the demo code. That should run without making any changes.
-Please ensure that demoImage.hdf5 is in the same directory as this file tstDemo.py.
+This is the training code to train the model as described in the following article:
 
-This code will load the learned model from the subdirectory 'savedModels'
+MoDL: Model-Based Deep Learning Architecture for Inverse Problems
+by H.K. Aggarwal, M.P. Mani, M. Jacob from University of Iowa.
 
-This test code will load an  image for  from the demoImage.hdf5 file.
+Paper dwonload  Link:     https://arxiv.org/abs/1712.02862
 
-@author: haggarwal
+This code solves the following optimization problem:
+
+    argmin_x ||Ax-b||_2^2 + ||x-Dw(x)||^2_2
+
+ 'A' can be any measurement operator. Here we consider parallel imaging problem in MRI where
+ the A operator consists of undersampling mask, FFT, and coil sensitivity maps.
+
+Dw(x): it represents the residual learning CNN.
+
+Here is the description of the parameters that you can modify below.
+
+epochs: how many times to pass through the entire dataset
+
+nLayer: number of layers of the convolutional neural network.
+        Each layer will have filters of size 3x3. There will be 64 such filters
+        Except at the first and the last layer.
+
+gradientMethod: AG, MG is gone. set MG for 'manual gradient' of conjuagate gradient (CG) block
+                as discussed in section 3 of the above paper. Set it to AG if
+                you want to rely on the tensorflow to calculate gradient of CG.
+
+K: it represents the number of iterations of the alternating strategy as
+    described in Eq. 10 in the paper.  Also please see Fig. 1 in the above paper.
+    Higher value will require a lot of GPU memory. Set the maximum value to 20
+    for a GPU with 16 GB memory. Higher the value more is the time required in training.
+
+sigma: the standard deviation of Gaussian noise to be added in the k-space
+
+batchSize: You can reduce the batch size to 1 if the model does not fit on GPU.
+
+Output:
+
+After running the code the output model will be saved in the subdirectory 'savedModels'.
+You can give the name of the generated ouput directory in the tstDemo.py to
+run the newly trained model on the test data.
+
+
+@author: Hemant Kumar Aggarwal
 """
-import os
+
+# import some librariesw
+import os,time
 os.environ['TF_CPP_MIN_LOG_LEVEL']='2'
 import numpy as np
-import tensorflow as tf
 import matplotlib.pyplot as plt
+import tensorflow as tf
+from datetime import datetime
+from tqdm import tqdm
 import supportingFunctions as sf
+import model as mm
 
-cwd=os.getcwd()
-tf.reset_default_graph()
+gpus = tf.config.experimental.list_physical_devices('GPU')
+if gpus:
+  try:
+    for gpu in gpus:
+        tf.config.experimental.set_memory_growth(gpu, True)
+  except RuntimeError as e:
+    print(e)
 
-#%% choose a model from savedModels directory
-
-#subDirectory='14Mar_1105pm'
-subDirectory='04Jun_0356pm_5L_10K_50E_AG'
-#%%Read the testing data from dataset.hdf5 file
-
-#tstOrg is the original ground truth
-#tstAtb: it is the aliased/noisy image
-#tstCsm: this is coil sensitivity maps
-#tstMask: it is the undersampling mask
+#--------------------------------------------------------------
 
 tstOrg,tstAtb,tstCsm,tstMask=sf.getTestingData()
+modelFile = "savedModels/25Apr_0819pm_3L_1K_2E_/model.keras"
+#modelFile = "savedModels/25Apr_0918pm_3L_2K_2E_/model.keras"
+modelFile = "savedModels/25Apr_0927pm_3L_1K_50E_/model.keras"
+modelFile = "savedModels/25Apr_1032pm_5L_1K_50E_/model.keras"
+modelFile = "savedModels/26Apr_1204pm_5L_1K_50E_/model.keras"
+modelFile = "savedModels/30Apr_1232pm_10L_1K_50E_/model.keras"
+modelFile = "savedModels/02May_1210pm_10L_1K_2E_/model.keras"
+modelFile = "savedModels/02May_0351pm_5L_2K_5E_/model.keras"
+modelFile = "savedModels/16May_0947pm_5L_1K_50E_/model.keras"
+modelFile = "savedModels/17May_0814am_5L_1K_50E_/model.keras"
+modelFile = "savedModels/17May_0914am_5L_1K_20E_/model.keras"
+modelFile = "savedModels/17May_0922am_5L_1K_20E_/model.keras"
+modelFile = "savedModels/17May_0929am_5L_1K_20E_/model.keras"
+modelFile = "savedModels/17May_0952am_5L_1K_20E_/model.keras"
+modelFile = "savedModels/17May_1007am_5L_1K_20E_/model.keras"
+modelFile = "savedModels/17May_1030am_5L_1K_20E_/model.keras"
 
-#you can also read more testing data from dataset.hdf5 (see readme) file using the command
-#tstOrg,tstAtb,tstCsm,tstMask=sf.getData('testing',num=100)
+rec = []
+with tf.keras.utils.custom_object_scope({'ConjugateGradientLayer': mm.ConjugateGradientLayer}, {'mi_customloss': mm.mi_customloss}):
+    loadedModel = tf.keras.models.load_model(modelFile)
+    rec = loadedModel.predict([tstCsm, tstMask, tstAtb])
 
-#%% Load existing model. Then do the reconstruction
-print ('Now loading the model ...')
+normOrg = sf.normalize01( np.abs(tstOrg) )
+normAtb = sf.normalize01( np.abs(sf.r2c(tstAtb))) 
+normRec = sf.normalize01( np.abs(rec) )
 
-modelDir= cwd+'/savedModels/'+subDirectory #complete path
-rec=np.empty(tstAtb.shape,dtype=np.complex64) #rec variable will have output
-
-tf.reset_default_graph()
-loadChkPoint=tf.train.latest_checkpoint(modelDir)
-config = tf.ConfigProto()
-config.gpu_options.allow_growth=True
-with tf.Session(config=config) as sess:
-    new_saver = tf.train.import_meta_graph(modelDir+'/modelTst.meta')
-    new_saver.restore(sess, loadChkPoint)
-    graph = tf.get_default_graph()
-    predT =graph.get_tensor_by_name('predTst:0')
-    maskT =graph.get_tensor_by_name('mask:0')
-    atbT=graph.get_tensor_by_name('atb:0')
-    csmT   =graph.get_tensor_by_name('csm:0')
-    wts=sess.run(tf.global_variables())
-    dataDict={atbT:tstAtb,maskT:tstMask,csmT:tstCsm }
-    rec=sess.run(predT,feed_dict=dataDict)
-
-rec=sf.r2c(rec.squeeze())
-print('Reconstruction done')
-
-#%% normalize the data for calculating PSNR
-
-print('Now calculating the PSNR (dB) values')
-
-normOrg=sf.normalize01( np.abs(tstOrg))
-normAtb=sf.normalize01( np.abs(sf.r2c(tstAtb)))
-normRec=sf.normalize01(np.abs(rec))
-
-psnrAtb=sf.myPSNR(normOrg,normAtb)
-psnrRec=sf.myPSNR(normOrg,normRec)
+psnrAtb = sf.myPSNR(normOrg,normAtb)
+psnrRec = sf.myPSNR(normOrg,normRec)
 
 print ('*****************')
 print ('  ' + 'Noisy ' + 'Recon')
@@ -97,3 +124,8 @@ plt.title('Output, PSNR='+ str(psnrRec.round(2)) +' dB')
 plt.axis('off')
 plt.subplots_adjust(left=0, right=1, top=1, bottom=0,wspace=.01)
 plt.show()
+
+print ('*************************************************')
+
+#%%
+
