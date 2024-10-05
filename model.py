@@ -1,12 +1,3 @@
-"""
-This code will create the model described in our following paper
-MoDL: Model-Based Deep Learning Architecture for Inverse Problems
-by H.K. Aggarwal, M.P. Mani, M. Jacob from University of Iowa.
-
-Paper dwonload  Link:     https://arxiv.org/abs/1712.02862
-
-@author: haggarwal
-"""
 import tensorflow as tf
 import numpy as np
 from os.path import expanduser
@@ -19,37 +10,44 @@ c2r=lambda x:tf.stack([tf.math.real(x),tf.math.imag(x)],axis=-1)
 #r2c takes the last dimension of real input and converts to complex
 r2c=lambda x:tf.complex(x[...,0],x[...,1])
 
-def AggarwalLayer(x, lastLayer):
+def ResNetLayer(x, n_channels, useActivation):
     """
     This function create a layer of CNN consisting of convolution, batch-norm,
     and ReLU. Last layer does not have ReLU to avoid truncating the negative
     part of the learned noise and alias patterns.
     """
     window_size = (3, 3, 3)
-    n_channels = 2 if lastLayer else 64
     x = tf.keras.layers.Conv3D(filters=n_channels, kernel_size=window_size, padding='same')(x)
     x = tf.keras.layers.LayerNormalization()(x)
 
-    if lastLayer:
-        return x
-    else:
+    if useActivation:
         return tf.keras.layers.Activation(activation='relu')(x)
+    else:
+        return x
 
 def makeDoubleConvBlock(x, n_filters):
-    x = tf.keras.layers.Conv3D(filters=n_filters, kernel_size=3, padding='same', activation='relu', kernel_initializer='he_normal')(x)
-    x = tf.keras.layers.Conv3D(filters=n_filters, kernel_size=3, padding='same', activation='relu', kernel_initializer='he_normal')(x)
-    return x#tf.keras.layers.BatchNormalization()(x)
+    x = tf.keras.layers.Conv3D(filters=n_filters, kernel_size=3, padding='same', kernel_initializer='he_normal')(x)
+    x = tf.keras.layers.LayerNormalization()(x)
+    x = tf.keras.activations.relu(x)
+    x = tf.keras.layers.Conv3D(filters=n_filters, kernel_size=3, padding='same', kernel_initializer='he_normal')(x)
+    x = tf.keras.layers.LayerNormalization()(x)
+    return tf.keras.activations.relu(x)
 
 def makeDownsampleBlock(x, n_filters):
     f = makeDoubleConvBlock(x, n_filters)
     p = tf.keras.layers.MaxPool3D(2, padding='same')(f)
-    p = tf.keras.layers.Dropout(0.3)(p)
+    #p = tf.keras.layers.Dropout(0.1)(p)
     return f, p
 
-def makeUpsampleBlock(x, conv_features, n_filters):
+def makeUpsampleBlock(x, skip, n_filters):
     x = tf.keras.layers.Conv3DTranspose(n_filters, 3, 2, padding='same')(x)
-    x = tf.keras.layers.concatenate([x, conv_features])
-    x = tf.keras.layers.Dropout(0.3)(x)
+    cropping_0 = x.shape.as_list()[-4] - skip.shape.as_list()[-4]
+    cropping_1 = x.shape.as_list()[-3] - skip.shape.as_list()[-3]
+    cropping_2 = x.shape.as_list()[-2] - skip.shape.as_list()[-2]
+    cropped_x = tf.keras.layers.Cropping3D(((0, cropping_0), (0, cropping_1), (0, cropping_2)))(x)
+    x = tf.keras.layers.concatenate([cropped_x, skip])
+    x = tf.keras.layers.LayerNormalization()(x)
+    #x = tf.keras.layers.Dropout(0.3)(x)
     x = makeDoubleConvBlock(x, n_filters)
     return x
 
@@ -129,7 +127,7 @@ class PInvLayer(tf.keras.layers.Layer):
         #print("rhs shape is", rhs.shape, "out shape is", out.shape)
         return tf.transpose(out, (0, 3, 1, 4, 2))
 
-def makePhysicsModel(b, csm, nLayers, K, useAggarwal, encode, sliceMatrix):
+def makePhysicsModel(b, csm, nLayers, nChannels, nBlocks, useUNet, encode, sliceMatrix):
     with tf.name_scope('myModel'):
         encode_exp = tf.expand_dims(tf.expand_dims(r2c(encode), 0), 0)
         encodePinv = tf.expand_dims(myPinv(encode_exp, 0.001), -2)
@@ -137,7 +135,7 @@ def makePhysicsModel(b, csm, nLayers, K, useAggarwal, encode, sliceMatrix):
         csmPinvLam = tf.expand_dims(myPinv(r2c(csm), cg.lam), -1)
         z = tf.zeros_like(c2r(tf.squeeze(tf.expand_dims(r2c(b), -3) @ csmPinvLam, -1)))
         x = cg(b, z, csmPinvLam, encodePinv, r2c(csm), sliceMatrix)
-        for i in range(1,K+1):
+        for i in range(1,nBlocks+1):
             """
             This micro loop is the Dw block as defined in the Fig. 1 of the MoDL paper
             It creates an n-layer (nLay) residual learning CNN.
@@ -146,14 +144,20 @@ def makePhysicsModel(b, csm, nLayers, K, useAggarwal, encode, sliceMatrix):
             dw: it is the output of residual learning after adding the input back.
             """
             z_img = x
-            if useAggarwal:
-                for j in np.arange(1,nLayers+1):
-                    z_img = AggarwalLayer(z_img, j==nLayers)
+            if useUNet:
+                f1, z_img = makeDownsampleBlock(z_img, nChannels)
+                f2, z_img = makeDownsampleBlock(z_img, nChannels * 2)
+                f3, z_img = makeDownsampleBlock(z_img, nChannels * 4)
+                f4, z_img = makeDownsampleBlock(z_img, nChannels * 8)
+                z_img = makeDoubleConvBlock(z_img, nChannels * 16)
+                z_img = makeUpsampleBlock(z_img, f4, nChannels * 8)
+                z_img = makeUpsampleBlock(z_img, f3, nChannels * 4)
+                z_img = makeUpsampleBlock(z_img, f2, nChannels * 2)
+                z_img = makeUpsampleBlock(z_img, f1, nChannels)
+                z_img = ResNetLayer(z_img, 2, False)
             else:
-                n_filters_initial = pow(2, nLayers + 1) # +1 because of real vs complex
-                f1, z_img = makeDownsampleBlock(z_img, n_filters_initial)
-                z_img = makeDoubleConvBlock(z_img, 2 * n_filters_initial)
-                z_img = makeUpsampleBlock(z_img, f1, n_filters_initial)
+                for j in np.arange(1,nLayers+1):
+                    z_img = ResNetLayer(z_img, 2 if j==nLayers else nChannels, j<nLayers)
             #mb_slice_matrix = np.zeros((1, (shapez - 1) * acceleration, shapez, 1, shapey * acceleration, shapey, 1), dtype=np.float32)
             #print(z_img.shape, sliceMatrix.shape)
             z_sliced = tf.squeeze(tf.squeeze(tf.squeeze(tf.tensordot(z_img + x, sliceMatrix, ([1, 2], [1, 5])), 3), 4), 5)
@@ -164,37 +168,12 @@ def makePhysicsModel(b, csm, nLayers, K, useAggarwal, encode, sliceMatrix):
             x = cg(b, encoded_z_H, csmPinvLam, encodePinv, r2c(csm), sliceMatrix)
     return x
 
-def makePureAggarwalModel(b,csm,nLayers):
-    x = b
-    with tf.name_scope('myModel'):
-        for j in np.arange(nLayers):
-            x = AggarwalLayer(x, j+1 == nLayers)
-    return r2c(x)
-
-def makePureUNetModel(b,csm):
-    x = b
-    with tf.name_scope('myModel'):
-        f1, x = makeDownsampleBlock(x, 64)
-        #f2, x = makeDownsampleBlock(x, 128)
-        #f3, x = makeDownsampleBlock(x, 256)
-        x = makeDoubleConvBlock(x, 128)
-        #f4, x = makeDownsampleBlock(x, 512)
-        #x = makeDoubleConvBlock(x, 1024)
-        #x = makeUpsampleBlock(x, f4, 512)
-        #x = makeUpsampleBlock(x, f3, 256)
-        #x = makeUpsampleBlock(x, f2, 128)
-        x = makeUpsampleBlock(x, f1, 64)
-        #x = tf.keras.layers.Conv2D(2, 1, padding='same', activation='softmax')(x)
-    return r2c(x)
-
 class LossCalculator:
-    def __init__(self, num_hbuckets, max_intensity, beta_mult):
-    #num_hbuckets = 30
-    #max_intensity = 3000 # circumstantial
-    # beta_mult = 50
-        self.hbuckets = tf.convert_to_tensor(np.linspace(0.5, num_hbuckets - 0.5, num=num_hbuckets, dtype=np.float32) * max_intensity / num_hbuckets)
-        self.beta = beta_mult / (max_intensity * max_intensity * 90 * 90 * 60) # didnt use real voxel counts because this is number is still tbd
-        self.sigmoid_slope = num_hbuckets / max_intensity # we want to map (-3,3) of sigmoid input to one bucket
+    def __init__(self, n_histogram_buckets, max_intensity, beta_mult):
+        self.beta_mult = beta_mult
+        self.hbuckets = tf.convert_to_tensor(np.linspace(0.5, n_histogram_buckets - 0.5, num=n_histogram_buckets, dtype=np.float32) * max_intensity / n_histogram_buckets)
+        self.beta = beta_mult / (max_intensity * 90 * 90 * 60) # didnt use real voxel counts because this is number is still tbd
+        self.sigmoid_slope = n_histogram_buckets / max_intensity # we want to map (-3,3) of sigmoid input to one bucket
 
     def mse_customloss(self, y_true, y_pred):
         return self.beta * tf.reduce_mean(tf.square(tf.math.abs(r2c(y_pred)) - y_true))
@@ -208,4 +187,10 @@ class LossCalculator:
         ps = tf.reduce_sum(pfs, axis=0)
         pf_ps = pf[:, None] * ps[None, :]
         return -tf.reduce_mean(pfs * tf.math.log(pfs / pf_ps)) + self.beta * tf.reduce_mean(tf.square(y_true - tf.math.abs(r2c(y_pred))))
+
+    def emd_customloss(self, y_true, y_pred):
+        f_sigmoids = tf.math.sigmoid(self.sigmoid_slope * (tf.expand_dims(tf.math.abs(r2c(y_pred)), -1) - self.hbuckets))
+        s_sigmoids = tf.math.sigmoid(self.sigmoid_slope * (tf.expand_dims(y_true, -1) - self.hbuckets))
+        sigmoid_products = tf.expand_dims(f_sigmoids * (1 - f_sigmoids), -1) * tf.expand_dims(s_sigmoids * (1 - s_sigmoids), -2)
+        return self.beta_mult * tf.reduce_mean(tf.math.abs(tf.expand_dims(self.hbuckets, -1) - tf.expand_dims(self.hbuckets, -2)) * sigmoid_products)
 

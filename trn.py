@@ -65,6 +65,7 @@ parser.add_argument('--smriFilespec', default='/home/jhutter3/data/*/T1_MPRAGEDi
 parser.add_argument('--acqFilespec', default='/home/jhutter3/data/*/*/kSpace/kspace.h5')
 parser.add_argument('--nExams', type=int, default=300)
 parser.add_argument('--nLayers', type=int, default=4)
+parser.add_argument('--nChannels', type=int, default=64)
 parser.add_argument('--nBlocks', type=int, default=1)
 parser.add_argument('--epochs', type=int, default=25)
 parser.add_argument('--nTimepoints', type=int, default=1)
@@ -72,12 +73,16 @@ parser.add_argument('--displayTest', action='store_true')
 parser.add_argument('--testExam', default="Exam9992Test", required=True)
 parser.add_argument('--testTimepoint', type=int, default=0)
 parser.add_argument('--minibatchSize', type=int, default=8)
-parser.add_argument('--useAggarwal', type=bool, default=True)
-parser.add_argument('--numHBuckets', type=int, default=30)
+parser.add_argument('--useUNet', action='store_true')
+parser.add_argument('--nHistogramBuckets', type=int, default=30)
 parser.add_argument('--betaMult', type=float, default=50)
+parser.add_argument('--learningRate', type=float, default=50)
 args = parser.parse_args()
 
 nExams = min(args.nExams, args.epochs * args.minibatchSize)
+minibatchSize = min(args.minibatchSize, nExams)
+if args.useUNet:
+    assert args.nBlocks == 1 and args.nLayers == 4
 
 #--------------------------------------------------------------------------
 #%%Generate a meaningful filename to save the trainined models for testing
@@ -87,8 +92,8 @@ saveDir='savedModels/'
 cwd=os.getcwd()
 directory=saveDir+datetime.now().strftime("%d%b_%I%M%P_")+ \
  str(args.nLayers)+'L_'+str(args.nBlocks)+'K_'+str(args.epochs)+'E_'+ \
- str(nExams)+'N_'+str(args.minibatchSize)+'M_'+str(args.betaMult)+'B_'+ \
- ("Aggarwal" if args.useAggarwal else "UNet")
+ str(nExams)+'N_'+str(minibatchSize)+'M_'+str(args.betaMult)+'B_'+ \
+ ("UNet" if args.useUNet else "ResNet")
 
 if not os.path.exists(directory):
     os.makedirs(directory)
@@ -131,8 +136,8 @@ for acqF in acqAllFilenames:
     if not smriFound:
         print(acqF)
     assert smriFound
-print(acqFilenames)
-print(smriFilenames)
+#print(acqFilenames)
+#print(smriFilenames)
 assert len(acqFilenames) == nExams
 assert len(smriFilenames) == nExams
 
@@ -175,7 +180,7 @@ print("smri magnitudes have min", trnSmri.min(), "mean", trnSmri.mean(), "max", 
 #%% make training model
 
 print ('training started at', datetime.now().strftime("%d-%b-%Y %I:%M %P"))
-print ('parameters are: Epochs:',args.epochs,' MBS:',args.minibatchSize,'nSamples:',nExams)
+print ('parameters are: Epochs:',args.epochs,' MBS:',minibatchSize,'nSamples:',nExams)
 
 #%% training code
 
@@ -192,18 +197,21 @@ with tf.device('/cpu:0'):
     yTest = tf.convert_to_tensor(tstSmri[-1:0])
 
 def fitModel(this_nBlocks, restoreWeights, encode, sliceMatrix):
-    out = mm.makePhysicsModel(bT,csmT,args.nLayers,this_nBlocks, args.useAggarwal, tf.convert_to_tensor(encode), tf.convert_to_tensor(sliceMatrix))
+    out = mm.makePhysicsModel(bT,csmT,args.nLayers,args.nChannels,this_nBlocks, args.useUNet, tf.convert_to_tensor(encode), tf.convert_to_tensor(sliceMatrix))
     model = tf.keras.Model(inputs=[csmT, bT], outputs=out)
     print(model.summary())
-    my_loss = mm.LossCalculator(args.numHBuckets, trnSmri.max(), args.betaMult)
-    model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=10., clipvalue=500.), loss=my_loss.mi_customloss)
+    my_loss = mm.LossCalculator(args.nHistogramBuckets, trnSmri.max(), args.betaMult)
+    #model.compile(optimizer=tf.keras.optimizers.AdamW(learning_rate=args.learningRate, clipnorm=args.learningRate), loss=my_loss.mse_customloss)
+    #model.compile(optimizer=tf.keras.optimizers.SGD(learning_rate=args.learningRate, clipnorm=args.learningRate*2), loss=my_loss.mse_customloss)
+    model.compile(optimizer=tf.keras.optimizers.Adadelta(learning_rate=args.learningRate), loss=my_loss.mse_customloss)
+
     histories = []
     test_losses = []
     if len(restoreWeights) > 0:
         restoreWeights_index = 0
         num_trainable_layers = 0
         for layer in model.layers[1:]:
-            if len(layer.trainable_weights) > 0:
+            if "layer_norm" not in layer.name and len(layer.trainable_weights) > 0:
                 if "p_inv_layer" in layer.name:
                     assert num_trainable_layers == 0 # assert that this one went first!
                 layer.set_weights(restoreWeights[restoreWeights_index])
@@ -216,7 +224,7 @@ def fitModel(this_nBlocks, restoreWeights, encode, sliceMatrix):
     for epoch_index in range(args.epochs):
         #csv_logger = tf.keras.callbacks.CSVLogger(directory + "/training.log", append=epoch_index>0)
         random.shuffle(sample_indices_list)
-        for minibatch_index in range(min(args.minibatchSize, len(sample_indices_list))):
+        for minibatch_index in range(minibatchSize):
             exam_index, timepoint = sample_indices_list[minibatch_index]
             trnB = sf.getFmriDataOnly(h5.File(acqFilenames[exam_index]), [timepoint])
             with tf.device('/cpu:0'):
@@ -236,6 +244,8 @@ def fitModel(this_nBlocks, restoreWeights, encode, sliceMatrix):
             #)
             #epoch += 1
             #tf.profiler.experimental.stop()
+            if epoch_index == 0:
+                print("Training loss on sample", minibatch_index, "is", trn_loss)
             histories.append((acqFilenames[exam_index], timepoint, trn_loss))
         test_loss = model.test_on_batch(x=[tstCsm, tstB[-1:]], y=tstSmri)
         test_losses.append(test_loss)
@@ -250,10 +260,10 @@ model, histories, test_losses = fitModel(1 if args.nBlocks > 0 else 0, [], trnEn
 if args.nBlocks>1:
     weights_by_layer = []
     for layer in model.layers:
-        if len(layer.trainable_weights) > 0:
+        if "layer_norm" not in layer.name and len(layer.trainable_weights) > 0:
             weights_by_layer.append(layer.get_weights())
     del model
-    model, histories, test_losses = fitModel(K, weights_by_layer, trnEncode, trnMbSlices)
+    model, histories, test_losses = fitModel(args.nBlocks, weights_by_layer, trnEncode, trnMbSlices)
 
 end_time = time.time()
 print ('Training completed in', ((end_time - start_time) / 60), 'minutes')
@@ -262,7 +272,7 @@ print ('training completed at', datetime.now().strftime("%d-%b-%Y %I:%M %P"))
 h5out = h5.File(directory + "/results.h5", 'w')
 trainable_names = []
 for layer in model.layers:
-    if len(layer.trainable_weights) > 0:
+    if "layer_norm" not in layer.name and len(layer.trainable_weights) > 0:
         trainable_names.append(layer.name)
         layer_weights = layer.get_weights()
         subgroup = h5out.create_group("weights_" + layer.name)
@@ -279,7 +289,7 @@ h5_timepoints = h5out.create_dataset("training_timepoints", (len(histories)), dt
 h5_timepoints.attrs['nTimepoints'] = args.nTimepoints
 h5_trnLosses = h5out.create_dataset("training_losses", (len(histories)), dtype=float)
 h5_trnLosses.attrs['betaMult'] = args.betaMult
-h5_trnLosses.attrs['numHBuckets'] = args.numHBuckets
+h5_trnLosses.attrs['nHistogramBuckets'] = args.nHistogramBuckets
 for history_index in range(len(histories)):
     file, tp, trn_loss = histories[history_index]
     h5_filenames[history_index] = file
