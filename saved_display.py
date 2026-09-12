@@ -12,7 +12,7 @@ This code solves the following optimization problem:
     argmin_x ||Ax-b||_2^2 + ||x-Dw(x)||^2_2
 
  'A' can be any measurement operator. Here we consider parallel imaging problem in MRI where
- the A operator consists of undersampling mask, FFT, and coil sensitivity maps.
+ the A operator consists of FFT and coil sensitivity maps.
 
 Dw(x): it represents the residual learning CNN.
 
@@ -55,70 +55,46 @@ import matplotlib.pyplot as plt
 import tensorflow as tf
 from datetime import datetime
 from tqdm import tqdm
-import supportingFunctions as sf
+import saved_sf2 as sf
 import model as mm
 
-gpus = tf.config.experimental.list_physical_devices('GPU')
-if gpus:
-  try:
-    for gpu in gpus:
-        tf.config.experimental.set_memory_growth(gpu, True)
-  except RuntimeError as e:
-    print(e)
+#%% read multi-channel dataset
 
-#--------------------------------------------------------------
-
-tstOrg,tstAtb,tstCsm=sf.getData()
-if len(tstOrg) > 1:
-    print("tst data can only handle 1 scan and 1 timepoint within that scan")
-    assert False
-
-modelFile = "savedModels/17May_1030am_5L_1K_20E_/model.keras"
-
-rec = []
-with tf.keras.utils.custom_object_scope({'ConjugateGradientLayer': mm.ConjugateGradientLayer}, {'mi_customloss': mm.mi_customloss}):
-    loadedModel = tf.keras.models.load_model(modelFile)
-    rec = loadedModel.predict([tstCsm, tstMask, tstAtb])
-
-tstOrg = np.squeeze(tstOrg)
-tstAtb = np.squeeze(tstAtb)
-rec = np.squeeze(rec)
-
-normOrg = sf.normalize01( np.abs(tstOrg) )
-normAtb = sf.normalize01( np.abs(sf.r2c(tstAtb))) 
-normRec = sf.normalize01( np.abs(rec) )
-
-psnrAtb = sf.myPSNR(normOrg,normAtb)
-psnrRec = sf.myPSNR(normOrg,normRec)
-
-print ('*****************')
-print ('  ' + 'Noisy ' + 'Recon')
-print ('  {0:.2f} {1:.2f}'.format(psnrAtb,psnrRec))
-print ('*****************')
-
-#%% Display the output images
-plot= lambda x: plt.imshow(x,cmap=plt.cm.gray, clim=(0.0, .8))
 plt.clf()
-plt.subplot(141)
-plot(np.fft.fftshift(tstMask[0]))
-plt.axis('off')
-plt.title('Mask')
-plt.subplot(142)
-plot(normOrg)
-plt.axis('off')
-plt.title('Original')
-plt.subplot(143)
-plot(normAtb)
-plt.title('Input, PSNR='+str(psnrAtb.round(2))+' dB' )
-plt.axis('off')
-plt.subplot(144)
-plot(normRec)
-plt.title('Output, PSNR='+ str(psnrRec.round(2)) +' dB')
-plt.axis('off')
-plt.subplots_adjust(left=0, right=1, top=1, bottom=0,wspace=.01)
+plot= lambda x: plt.imshow(x,cmap=plt.cm.gray, clim=(0.0, 1.0))
+subplot_i=1
+fig_i = 1
+
+trnSmri, trnInv, trnAtb, trnSmap, encode, mb_slices = sf.getData(0.1)
+tstInv = np.reshape(trnInv[0], (sf.shapez, sf.shapex, sf.shapey, sf.acceleration))
+inpInv = np.abs(tstInv)#.clip(-32767, 32767)
+
+image = np.zeros((sf.shapez * sf.acceleration, sf.shapex, sf.shapey))
+assert mb_slices.shape == (sf.acceleration, sf.shapez)
+for z in range(sf.shapez):
+    for acc in range(sf.acceleration):
+        image[mb_slices[acc, z]] = inpInv[z, ..., acc]
+
+for z in range(4, 60, 4):
+    plt.subplot(4, 4, subplot_i)
+    subplot_i += 1
+    plot(sf.normalize01(image[z]))
+    plt.axis('off')
+    plt.title(f"z={z}")
+
+    #plt.savefig("shiftcombo" + str(fig_i) + ".png")
+    #plt.clf()
 plt.show()
+plt.clf()
 
-print ('*************************************************')
+subplot_i = 1
+for x in range(5, 85, 5):
+    plt.subplot(4, 4, subplot_i)
+    subplot_i += 1
+    plot(sf.normalize01(image[:, x]))
+    plt.axis('off')
+    plt.title(f"x={x}")
 
-#%%
-
+    #plt.savefig("shiftcombo" + str(fig_i) + ".png")
+    #plt.clf()
+plt.show()

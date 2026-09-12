@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+*.so
+.Python
+savedModels/
+knee_trained_MoDL/
+*.h5
+*.hdf5
+*.keras
+*.npz
+out.h5
+*.png
+*.gif
+*.pdf
+.DS_Store
+.idea/
+.vscode/

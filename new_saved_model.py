@@ -89,9 +89,9 @@ class ConjugateGradientLayer(tf.keras.layers.Layer):
     This function is called to create testing model. It apply CG on each image
     in the batch.
     """
-    def call(self, b, z, csm):
+    def call(self, atb, z, csm):
         A = Aclass(csm, tf.complex(self.lam, tf.constant(0., dtype=np.float32)))
-        rhs = r2c(b + self.lam * z)
+        rhs = r2c(atb + self.lam * z)
         x = tf.zeros_like(rhs)
         r, p = rhs, rhs
         rTr = tf.reduce_sum(tf.math.conj(r) * r)
@@ -120,9 +120,9 @@ class PInvLayer(tf.keras.layers.Layer):
     This function is called to create testing model. It apply CG on each image
     in the batch.
     """
-    def call(self, b, z, csmPinvLam, encodePinv, csm):
-        #print(b.shape, r2c(z).shape, csm.shape)
-        rhs = r2c(b) + tf.linalg.matrix_transpose(tf.math.conj(csm @ r2c(self.lam * z)))
+    def call(self, atb, z, csmPinvLam, encodePinv, csm):
+        #print(atb.shape, r2c(z).shape, csm.shape)
+        rhs = r2c(atb) + tf.linalg.matrix_transpose(tf.math.conj(r2c(self.lam * z))) @ tf.linalg.matrix_transpose(tf.math.conj(csm))
         out = tf.squeeze(tf.squeeze(encodePinv @ tf.expand_dims(rhs, -3) @ csmPinvLam, -1), -1)
         return c2r(out)
 
@@ -135,8 +135,8 @@ class LstSqLayer(tf.keras.layers.Layer):
     This function is called to create testing model. It apply CG on each image
     in the batch.
     """
-    def call(self, b, z, csm):
-        rhs = r2c(b + self.lam * z)
+    def call(self, atb, z, csm):
+        rhs = r2c(atb + self.lam * z)
         #print(tf.linalg.matrix_transpose(rhs).dtype)
         #csmPinv = tf.expand_dims(myPinv(csm, 0.1), -1)
         #print("comparison, pinv middle shape is", (tf.expand_dims(rhs, -3) @ csmPinv).shape)
@@ -146,9 +146,9 @@ class LstSqLayer(tf.keras.layers.Layer):
         input_lam_complex = tf.complex(self.lam, tf.constant(0., dtype=np.float32))
         to_inv = ata + tf.broadcast_to(tf.reshape(eye, eye_shape), tf.shape(ata)) * input_lam_complex
         print("to inv shape is", to_inv.shape, csm.shape, rhs.shape)
-        b_true = tf.expand_dims(rhs, -3) @ tf.expand_dims(tf.math.conj(tf.linalg.matrix_transpose(csm)), axis=-1)
-        b_reshaped = tf.squeeze(b_true, -1)
-        out = tf.linalg.lstsq(to_inv, b_reshaped, fast=True)
+        atb_true = tf.expand_dims(rhs, -3) @ tf.expand_dims(tf.math.conj(tf.linalg.matrix_transpose(csm)), axis=-1)
+        atb_reshaped = tf.squeeze(atb_true, -1)
+        out = tf.linalg.lstsq(to_inv, atb_reshaped, fast=True)
         print("rhs shape is", rhs.shape, "out shape is", out.shape)
         return out
 
@@ -161,8 +161,8 @@ class LstSqLayer2(tf.keras.layers.Layer):
     This function is called to create testing model. It apply CG on each image
     in the batch.
     """
-    def call(self, b, z, csm):
-        rhs = r2c(b + self.lam * z)
+    def call(self, atb, z, csm):
+        rhs = r2c(atb + self.lam * z)
         #print(tf.linalg.matrix_transpose(rhs).dtype)
         #csmPinv = tf.expand_dims(myPinv(csm, 0.1), -1)
         #print("comparison, pinv middle shape is", (tf.expand_dims(rhs, -3) @ csmPinv).shape)
@@ -177,15 +177,15 @@ class LstSqLayer2(tf.keras.layers.Layer):
         #print("rhs shape is", rhs.shape, "out shape is", out.shape)
         return out
 
-def makePhysicsAggarwalModel(b, csm, nLayers, K, encode, valid_slices):
+def makePhysicsAggarwalModel(atb, csm, nLayers, K, encode, valid_slices):
     #cg = ConjugateGradientLayer()
     with tf.name_scope('myModel'):
         encode_exp = tf.expand_dims(tf.expand_dims(r2c(encode), 0), 0)
         encodePinv = tf.expand_dims(myPinv(encode_exp, 0.001), -2)
         cg = PInvLayer()
         csmPinvLam = tf.expand_dims(myPinv(r2c(csm), cg.lam), -1)
-        z = tf.zeros_like(c2r(tf.squeeze(tf.expand_dims(r2c(b), -3) @ csmPinvLam, -1)))
-        x = cg(b, z, csmPinvLam, encodePinv, r2c(csm))
+        z = tf.zeros_like(c2r(tf.squeeze(tf.expand_dims(r2c(atb), -3) @ csmPinvLam, -1)))
+        x = cg(atb, z, csmPinvLam, encodePinv, r2c(csm))
         for i in range(1,K+1):
             """
             This micro loop is the Dw block as defined in the Fig. 1 of the MoDL paper
@@ -199,18 +199,19 @@ def makePhysicsAggarwalModel(b, csm, nLayers, K, encode, valid_slices):
                 z_img = AggarwalLayer(z_img, j==nLayers)
             encoded_z = encode_exp * tf.expand_dims(r2c(z_img), -2) # (66 x 540) * (1 x 540)
             encoded_z_H = c2r(tf.linalg.matrix_transpose(tf.math.conj(encoded_z)))
-            x = cg(b, encoded_z_H, csmPinvLam, encodePinv, r2c(csm))
+            #z = c2r(tf.linalg.matrix_transpose(r2c(csm) @ r2c(x))) # ((32 x 540) @ (540, 66)).T
+            x = cg(atb, encoded_z_H, csmPinvLam, encodePinv, r2c(csm))
     return x * tf.expand_dims(tf.expand_dims(valid_slices, 1), -1)
 
-def makePureAggarwalModel(b,csm,nLayers):
-    x = b
+def makePureAggarwalModel(atb,csm,nLayers):
+    x = atb
     with tf.name_scope('myModel'):
         for j in np.arange(nLayers):
             x = AggarwalLayer(x, j+1 == nLayers)
     return r2c(x)
 
-def makePureUNetModel(b,csm):
-    x = b
+def makePureUNetModel(atb,csm):
+    x = atb
     with tf.name_scope('myModel'):
         f1, x = makeDownsampleBlock(x, 64)
         #f2, x = makeDownsampleBlock(x, 128)
@@ -225,12 +226,12 @@ def makePureUNetModel(b,csm):
         #x = tf.keras.layers.Conv2D(2, 1, padding='same', activation='softmax')(x)
     return r2c(x)
 
-def makePhysicsUNetModel(b,csm,K):
+def makePhysicsUNetModel(atb,csm,K):
     cg = ConjugateGradientLayer()
-    x = b
+    x = atb
     for i in range(K):
         x = c2r(makePureUNetModel(x,csm))
-        x = c2r(cg(b, x, csm))
+        x = c2r(cg(atb, x, csm))
     return r2c(x)
 
 def mse_customloss(y_true, y_pred):
