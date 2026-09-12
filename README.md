@@ -1,113 +1,50 @@
-# MoDL
-MoDL: Model Based Deep Learning Architecture for Inverse Problems 
+# fMRI SENSE
 
-### Reference paper: 
+Unfold GE SMS-EPI fMRI k-space with a SENSE inverse (coil sensitivity maps plus the multiband / PE encoding matrix). Training optionally stacks a residual CNN on that unfold and uses mutual information against a T1 volume already in EPI space.
 
-MoDL: Model Based Deep Learning Architecture for Inverse Problems  by H.K. Aggarwal, M.P Mani, and Mathews Jacob in IEEE Transactions on Medical Imaging,  2018 
+This is **not** MoDL. It does not implement the Iowa MoDL paper, and it is not a knee/brain parallel-imaging demo.
 
-Link: https://arxiv.org/abs/1712.02862
+## Acquisition this code assumes
 
-IEEE Xplore: https://ieeexplore.ieee.org/document/8434321/
+Hard-coded in `saved_sf2.py` for the GE SMS-EPI exams this tree was written against:
 
-Presentation:  https://github.com/hkaggarwal/modl/blob/master/MoDL_ppt.pdf
+| Parameter | Value |
+| --- | --- |
+| Matrix | 90 × 90 × 60 |
+| Multiband | 6 (11 packs, FOV-shift 3) |
+| Coils | 32 |
+| Acquired ky | 66 |
+| Time points | 450 |
 
-#### What this code do:
-In the above paper, we propose a technique to combine the power of deep-learning with the model-based approaches. This code suggest how we can use a deep convolutional neural netwrok (CNN) as a regularizer to solve an optimization problem.
+Input k-space is an Orchestra-style HDF5 (`kspace.h5`) with `kspace_data/volume_*`, calibration `surface_images`, and `multiband_info/multiband_slices`. The T1 is a NIfTI.
 
-This code solves the following optimization problem:
+## Training
 
-     argmin_x ||Ax-b||_2^2 + ||x-Dw(x)||^2_2 
+Edit the paths in `trn.py` (`smriFilenames`, `acqFilenames`) to a T1 (EPI-space) and a `kspace.h5`, then:
 
- `A` can be any measurement operator. Here we consider parallel imaging problem in MRI where
- the `A` operator consists of undersampling mask, FFT, and coil sensitivity maps.
+```bash
+python trn.py
+```
 
-`Dw(x)`: it represents the denoiser using a residual learning CNN.
+`trn.py` loads coil maps and the SMS encoding from `saved_sf2.getData`, unfolds with a regularized pinv (`model.py`), and trains with `mi_customloss` (histogram MI vs the T1, plus a small magnitude MSE term). Checkpoints go under `savedModels/` (gitignored).
 
-#### Recursive MoDL architecture:
-![alt text](https://github.com/hkaggarwal/modl/blob/master/MoDL_recursive.png)
+Useful knobs at the top of `trn.py`: `epochs`, `K` (unfold / CNN cycles), `nLayers`, `nTimepoints`, `minibatchSize`.
 
-#### Main benefits of the MoDL:
-1. One of the first deep model that works with parallel MRI data.
-2. Can account for more general image forward models by using conjugate graident
-3. Needs less training data because of weight sharing across MoDL iterations.
-![alt text](https://github.com/hkaggarwal/modl/blob/master/model_benefits.png)
+## Files
 
-#### Output on the Brain data:
-![alt text](https://raw.githubusercontent.com/hkaggarwal/modl/master/output_brain.png)
+| File | Role |
+| --- | --- |
+| `trn.py` | Training entry point |
+| `model.py` | SENSE/pinv unfold, residual CNN, MI loss |
+| `saved_sf2.py` | k-space I/O, coil maps, SMS encoding matrix |
+| `displayInv.py` | Quick look at an unfold |
+| `tstDemo.py`, `supportingFunctions.py` | Leftover demo code; not used by `trn.py` |
+| `saved_model.py`, `new_saved_model.py`, `saved_display.py` | Older copies of the model / display scripts |
 
-#### Output on the Knee data:
-The output GIF is showing the reconstructions from  10 iterations of alternating minimization as described in the MoDL paper.
-![knee results](https://github.com/hkaggarwal/modl/blob/master/output_knee.gif)
+## Dependencies
 
+TensorFlow 2, NumPy, h5py, nibabel, scikit-image, matplotlib, tqdm. A machine-specific freeze is in `requirements.txt`.
 
-#### Dependencies
+## Contact
 
-We have tested the code in Anaconda python 2.7 and 3.6. The code should work with Tensorflow-1.7 onwards.
-The dataset is in the hdf5 format. You may require to install hdf5 library in python. 
-In Anaconda you can give following command
-`conda install h5py`
-
-The training code requires tqdm library. It is a nice library that is helpful in tracking the training progress.
-It can be installed using:
-`conda install tqdm`
-
-In addition, matplotlib is required to visualize the output images.
-
-#### Brain Dataset
-
-This git repository also includes a single image in the file `demoImage.hdf5`. The testing script `tstDemo.py` will use this image by default and does not require full data download for the testing purpose.
-
-We have released the parallel imaging dataset used in this paper. You can download the full dataset from the below link:
-
- **Download Link** :  https://zenodo.org/records/6481291
-
-You will need the file `dataset.hdf5` to run the training code `trn.py`. You can download the dataset from the link provided above. Please ignore the future warning by python. You do not need to download the `dataset.hdf5` for testing purpose.
-
-
-This dataset consist of parallel magnetic resonance imaging (MRI) brain data of five human subjects. Four of which are used during training of the model and fifth subject is used during testing.
-Above link contain fully sampled preprocessed data in numpy format for both training and testing. We also provide coil-sensitity-maps (CSM) pre-computed using E-SPIRIT algorithm. Total file size is 3 GB and contains following arrays:
-
-`trnOrg`: This is complex arrary of 256x232x360 containing 90 slices from each of the 4 training subjects. 
-        Each slice is of  spatial dimension 256x232. This is the original fully sampled data.
-        
-`trnCSM`: This is a complex array of 256x232x12x360 representing coil sensitity maps (csm). Here 12 represent number of coils.
-
-`trnMask`: This is the random undersampling mask to do 6-fold acceleration. We use different mask for different slices.
-
-`tstOrg`,`tstCSM`, `tstMask`: These are similar arrays for testing purpose. There are total 164 testing images.
-
-The undersampling mask, for both training and testing cases, is shared corresponding to 6-fold acceleration case. 
-
-#### How to run the code
-
-First, ensure that Tensorflow 1.7 or higher version is installed and working with GPU. 
-Second, just clone or download this reporsitory. The `tstDemo.py` file should run without any changes in the code.
-On the command prompt `CD` to this `modl` directory i.e. the directory containig `tstDemo.py`.
-Then you can run the test code using the command: 
-
-`$python tstDemo.py` from the command prompt. 
-
-#### Knee Dataset
-The MoDL architecture can be trained using Knee datasets freely available from other sources. The directory `knee_trained_MoDL` contains a trained model on Knee data. Here we performed the training with a structured mask that is kept same for all the slices during training. The file `knee_demo_data.h5` contains one raw image, mask, as we as coil sensitivity maps corresponding to a single slice from a particular subject for demo purpose only. 
-Just use the command `$python knee_demo_code.py` to see the performance of the MoDL on Knee dataset.
-
-
-
-
-#### Files description
-The folder `savedModels` contain the learned tensorflow model parameters. `tstDemo.py` will use it to read the model and run on the demo image in the file `demoImage.hdf5`. 
-
-`supportingFunctions.py`: This file contain some supporting functions to calculate the time, PSNR, and read the dataset.
-
-`model.py`: This file contain the code for creating the residual learning CNN model as well as the algorithm for 
-	      conjugate-gradient on complex data.
-	      
-`trn.py`: This is the training code
-
-`tstDemo.py`: This is the testing code
-
-
-#### Contact
-The code is provided to support reproducible research. If the code is giving syntax error in your particular python configuration or some files are missing then you may open an issue or directly email me at jnu.hemant@gmail.com
-
-
+Joseph Hutter, `josephahutter@gmail.com`

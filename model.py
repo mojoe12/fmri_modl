@@ -1,11 +1,6 @@
 """
-This code will create the model described in our following paper
-MoDL: Model-Based Deep Learning Architecture for Inverse Problems
-by H.K. Aggarwal, M.P. Mani, M. Jacob from University of Iowa.
-
-Paper dwonload  Link:     https://arxiv.org/abs/1712.02862
-
-@author: haggarwal
+SENSE / pinv unfold of SMS-EPI k-space, optional residual CNN, and
+mutual-information loss versus a T1 volume.
 """
 import tensorflow as tf
 import numpy as np
@@ -188,11 +183,8 @@ def makePhysicsAggarwalModel(b, csm, nLayers, K, encode, valid_slices):
         x = cg(b, z, csmPinvLam, encodePinv, r2c(csm))
         for i in range(1,K+1):
             """
-            This micro loop is the Dw block as defined in the Fig. 1 of the MoDL paper
-            It creates an n-layer (nLay) residual learning CNN.
-            Convolution filters are of size 3x3 and 64 such filters are there.
-            nw: It is the learned noise
-            dw: it is the output of residual learning after adding the input back.
+            Residual CNN: nLayers of 3x3 conv with 64 filters; last layer has
+            no ReLU. The CNN output is re-encoded and fed back into the pinv unfold.
             """
             z_img = x
             for j in np.arange(1,nLayers+1):
